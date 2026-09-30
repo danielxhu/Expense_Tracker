@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>记账</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>💵</text></svg>">
+</head>
+<body>
+<main>
+  <div id="alerts"></div>
+
+  <section class="card" id="overview">
+    <div class="empty"><span class="spin"></span>加载中…</div>
+  </section>
+
+  <section class="card">
+    <div class="row wrap" style="margin-bottom:12px">
+      <input id="q" placeholder="搜店铺、备注、分类…" style="flex:2 1 190px;min-width:150px">
+      <select id="fcat" style="flex:1 1 118px;min-width:110px"><option value="">全部分类</option></select>
+      <button class="ghost sm" id="moreBtn" type="button">更多筛选</button>
+    </div>
+    <div class="row wrap" id="more" hidden style="margin-bottom:12px">
+      <label class="field" style="flex:1 1 120px"><span>最小金额</span><input id="fmin" type="number" step="0.01" inputmode="decimal" placeholder="0"></label>
+      <label class="field" style="flex:1 1 120px"><span>最大金额</span><input id="fmax" type="number" step="0.01" inputmode="decimal" placeholder="不限"></label>
+      <label class="field" style="flex:1 1 140px"><span>起始日期</span><input id="ffrom" type="date"></label>
+      <label class="field" style="flex:1 1 140px"><span>结束日期</span><input id="fto" type="date"></label>
+      <button class="ghost sm" id="clearBtn" type="button" style="align-self:flex-end">清空</button>
+    </div>
+
+    <div class="row small muted" style="margin-bottom:2px">
+      <span id="listInfo"></span>
+      <span class="spacer"></span>
+      <a class="thumb" id="csv" href="/export.csv">导出 CSV</a>
+    </div>
+    <div id="list"><div class="empty"><span class="spin"></span></div></div>
+  </section>
+</main>
+
+<dialog id="editDlg">
+  <form method="dialog">
+    <div class="dlg-head" id="editTitle">编辑</div>
+    <div class="dlg-body">
+      <label class="field"><span>商户</span><input id="e_merchant" required></label>
+      <div class="grid2">
+        <label class="field"><span>金额（原币）</span><input id="e_amount" type="number" step="0.01" inputmode="decimal" required></label>
+        <label class="field"><span>币种</span><select id="e_currency"></select></label>
+      </div>
+      <label class="field"><span>分类</span><select id="e_category"></select></label>
+      <div class="grid2">
+        <label class="field"><span>日期</span><input id="e_date" type="date" required></label>
+        <label class="field"><span>时间（可空）</span><input id="e_time" type="time"></label>
+      </div>
+      <label class="field"><span>类型</span>
+        <select id="e_kind">
+          <option value="expense">支出</option>
+          <option value="refund">退款</option>
+          <option value="payment">还款 / 转账（不计入统计）</option>
+        </select>
+      </label>
+      <label class="field"><span>备注</span><input id="e_note" placeholder="可空"></label>
+      <label class="row small" style="gap:7px;cursor:pointer">
+        <input type="checkbox" id="e_remember" style="width:auto;flex:0 0 auto">
+        <span class="muted" id="e_rememberLabel">记住这个商户的分类</span>
+      </label>
+      <button type="button" class="sm" id="e_ccyAll" hidden style="justify-content:center"></button>
+      <div id="e_extra" class="tiny faint"></div>
+    </div>
+    <div class="dlg-foot">
+      <button type="button" class="danger" id="e_del">删除</button>
+      <button type="button" class="sm" id="e_unmerge" hidden>撤销合并</button>
+      <span class="spacer"></span>
+      <button value="cancel">取消</button>
+      <button class="primary" id="e_save" type="button">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="pairDlg">
+  <div class="dlg-head">疑似重复</div>
+  <div class="dlg-body">
+    <p class="small muted" style="margin:0">
+      金额分毫不差、店名相似、日期挨得近 —— 很可能是同一笔消费的小票和账单。
+      合并会保留账单那条（银行金额最准），小票的时间和分类补上去。
+    </p>
+    <div id="pairs"></div>
+  </div>
+  <div class="dlg-foot"><button class="primary" id="pairClose">关闭</button></div>
+</dialog>
+
+<script type="module">
+import { $, el, api, money, donut, niceDate, mountNav, flash, SOURCE_CN } from '/app.js';
+
+let boot, cats = [], cur = 'USD';
+const state = { period: '', q: '', category: '', min: '', max: '', from: '', to: '' };
+const catColor = n => cats.find(c => c.name === n)?.color || '#6b7280';
+
+/* ------------------------------------------------------------- 启动 */
+
+boot = await api('/api/bootstrap');
+cats = boot.categories;
+cur = boot.currency;
+state.period = boot.period;
+mountNav('/', boot.pending);
+
+$('#fcat').append(...cats.map(c => el('option', { value: c.name }, c.name)));
+$('#e_category').append(...cats.map(c => el('option', { value: c.name }, c.name)));
+
+// 币种下拉：主币种 + 配了汇率的 + 账目里出现过的
+// 兜底带上常用币种 —— 汇率表万一是空的也得能选到 CNY
+const ccyList = [...new Set([
+  boot.currency, ...Object.keys(boot.rates || {}),
+  ...(boot.currencies || []).map(c => c.currency),
+  'USD', 'CNY', 'EUR', 'GBP', 'HKD', 'JPY', 'TWD',
+])];
+$('#e_currency').append(...ccyList.map(c => el('option', { value: c },
+  c === boot.currency ? `${c}（主币种）` : c)));
+
+if (boot.stale) {
+  flash($('#alerts'), 'err', el('div', {}, el('b', {}, '代码已更新，但服务还在跑旧版。'),
+    ' 磁盘上的 server.js / lib 和内存里的不一致 —— 关掉那个黑窗口，重新双击 start.bat。'),
+    { sticky: true });
+}
+
+if (!boot.api_key_set) {
+  flash($('#alerts'), 'warn', el('div', {}, el('b', {}, '还没配置识别模型。'),
+    ' 上传的图片没法自动识别 —— ',
+    el('a', { href: '/settings' }, '去设置里填个免费的 API key'), '（两分钟）。'), { sticky: true });
+}
+if (boot.pending) showPendingBanner(boot.pending);
+if (boot.unconverted) {
+  flash($('#alerts'), 'warn', el('div', {},
+    el('b', {}, `${boot.unconverted} 笔外币还没折算`),
+    ' —— 这些笔不计入总额。',
+    el('a', { href: '/settings' }, '去设置里补一下汇率'), '，然后点「重算」。'), { sticky: true });
+}
+
+await Promise.all([renderOverview(), renderList()]);
+
+/* ------------------------------------------------------- 疑似重复条 */
+
+function showPendingBanner(n) {
+  $('#alerts').querySelector('.banner.warn.pending')?.remove();
+  if (!n) return;
+  const b = flash($('#alerts'), 'warn', el('div', { class: 'row', style: 'width:100%' },
+    el('span', {}, `发现 `, el('b', {}, `${n} 笔`), ` 疑似和已有记录是同一笔消费。`),
+    el('span', { class: 'spacer' }),
+    el('button', { class: 'sm', onClick: openPairs }, '看一下'),
+  ), { sticky: true });
+  b.classList.add('pending');
+}
+
+async function openPairs() {
+  const { candidates } = await api('/api/candidates');
+  const box = $('#pairs');
+  box.replaceChildren();
+  if (!candidates.length) box.append(el('div', { class: 'empty' }, '没有待确认的了。'));
+
+  for (const c of candidates) {
+    const side = (lbl, name, date, time, cat) => el('div', { class: 'side' },
+      el('div', { class: 'lbl' }, lbl),
+      el('div', { class: 'nm' }, name),
+      el('div', { class: 'tiny faint' }, `${date}${time ? ' ' + time : ''} · ${cat}`),
+    );
+    const card = el('div', { style: 'padding:12px 0;border-bottom:1px solid var(--border)' },
+      el('div', { class: 'pair' },
+        side('小票', c.r_merchant, c.r_date, c.r_time, c.r_category),
+        el('div', { class: 'vs' }, '⇄'),
+        side('账单', c.s_merchant, c.s_date, null, c.s_category),
+      ),
+      el('div', { class: 'row', style: 'margin-top:10px' },
+        el('span', { class: 'mono', style: 'font-weight:600' }, money(c.s_cents, cur)),
+        el('span', { class: 'tiny faint' }, c.reason),
+        el('span', { class: 'spacer' }),
+        el('button', { class: 'sm', onClick: () => act(c.id, 'ignore') }, '不是同一笔'),
+        el('button', { class: 'sm primary', onClick: () => act(c.id, 'merge') }, '合并'),
+      ),
+    );
+    box.append(card);
+  }
+  if (!$('#pairDlg').open) $('#pairDlg').showModal();   // 已经开着就别再 showModal，会抛异常
+
+  async function act(id, what) {
+    const r = await api(`/api/candidates/${id}/${what}`, { method: 'POST' });
+    showPendingBanner(r.pending_total);
+    document.querySelector('nav .dot')?.replaceChildren(String(r.pending_total || ''));
+    if (!r.pending_total) document.querySelector('nav .dot')?.remove();
+    await Promise.all([renderOverview(), renderList()]);
+    await openPairs();
+  }
+}
+$('#pairClose').onclick = () => $('#pairDlg').close();
+
+/* --------------------------------------------------------- 月度总览 */
+
+async function renderOverview() {
+  const s = await api(`/api/summary?period=${state.period}`);
+
+  const sel = el('select', {
+    style: 'width:auto;padding:5px 8px;font-size:13px',
+    onChange: async e => { state.period = e.target.value; await Promise.all([renderOverview(), renderList()]); },
+  }, ...boot.periods.map(p => el('option',
+      { value: p.start, selected: p.start === state.period || null },
+      p.label + (p.start === boot.period ? '（本期）' : ''))));
+
+  const diff = s.total_cents - s.prev_total_cents;
+  const pct = s.prev_total_cents > 0 ? Math.round(Math.abs(diff) / s.prev_total_cents * 100) : null;
+  const delta = s.prev_total_cents === 0 && s.total_cents === 0 ? null
+    : el('span', { class: `delta ${diff > 0 ? 'up' : 'down'}` },
+        diff === 0 ? '和上一期持平'
+        : `${diff > 0 ? '↑' : '↓'} 比上一期${diff > 0 ? '多' : '少'} ${money(Math.abs(diff), cur)}${pct !== null ? `（${pct}%）` : ''}`);
+
+  const legend = el('div', { class: 'legend' },
+    ...s.by_category.map(c => {
+      const pctv = s.total_cents ? (c.cents / s.total_cents * 100) : 0;
+      return el('button', { type: 'button', onClick: () => { state.category = c.name; $('#fcat').value = c.name; renderList(); } },
+        el('span', { class: 'swatch', style: `background:${c.color || '#6b7280'}` }),
+        el('span', { class: 'nm' }, c.name),
+        el('span', { class: 'pct' }, `${pctv.toFixed(0)}%`),
+        el('span', { class: 'amt mono' }, money(c.cents, cur)),
+      );
+    }),
+  );
+
+  $('#overview').replaceChildren(
+    el('div', { class: 'row', style: 'margin-bottom:12px' },
+      sel, el('span', { class: 'spacer' }),
+      el('span', { class: 'tiny faint' }, `${s.count} 笔`),
+    ),
+    el('div', { class: 'total', style: 'margin-bottom:16px' },
+      el('div', { class: 'amount mono' }, el('span', { class: 'cur' }, '$'),
+        (s.total_cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+      delta,
+    ),
+    s.by_category.length
+      ? el('div', { class: 'donut-wrap' },
+          donut(s.by_category, { cur, onSlice: d => { state.category = d.name; $('#fcat').value = d.name; renderList(); } }),
+          legend)
+      : el('div', { class: 'empty' }, '这个账期还没有记录。',
+          el('br'), el('a', { href: '/upload', class: 'btn primary sm', style: 'margin-top:12px' }, '上传小票或账单截图')),
+  );
+}
+
+/* ----------------------------------------------------------- 流水表 */
+
+function qs() {
+  const p = new URLSearchParams();
+  if (state.q) p.set('q', state.q);
+  if (state.category) p.set('category', state.category);
+  if (state.min !== '') p.set('min', state.min);
+  if (state.max !== '') p.set('max', state.max);
+  // 有日期区间时按区间查，否则按当前月份
+  if (state.from || state.to) {
+    if (state.from) p.set('from', state.from);
+    if (state.to) p.set('to', state.to);
+  } else {
+    p.set('period', state.period);
+  }
+  return p;
+}
+
+async function renderList() {
+  const p = qs();
+  $('#csv').href = '/export.csv?' + p.toString();
+  const { rows, total, sum_cents } = await api('/api/transactions?' + p.toString());
+
+  const filtered = state.q || state.category || state.min !== '' || state.max !== '' || state.from || state.to;
+  const periodLabel = boot.periods.find(p => p.start === state.period)?.label || state.period;
+  $('#listInfo').textContent = filtered
+    ? `筛出 ${total} 笔，合计 ${money(sum_cents, cur)}`
+    : `${periodLabel} 共 ${total} 笔`;
+
+  const box = $('#list');
+  box.replaceChildren();
+  if (!rows.length) {
+    box.append(el('div', { class: 'empty' }, filtered ? '没有符合条件的记录。' : '还没有记录。'));
+    return;
+  }
+
+  let lastDate = null;
+  for (const t of rows) {
+    if (t.txn_date !== lastDate) {
+      lastDate = t.txn_date;
+      box.append(el('div', {
+        class: 'tiny faint', style: 'padding:14px 4px 4px;font-weight:600;letter-spacing:.03em',
+      }, niceDate(t.txn_date, boot.today)));
+    }
+    box.append(txnRow(t));
+  }
+}
+
+function txnRow(t) {
+  const meta = [];
+  if (t.txn_time) meta.push(t.txn_time);
+  meta.push(el('span', { class: 'chip', style: `border-color:${catColor(t.category)}55` }, t.category));
+  meta.push(SOURCE_CN[t.source] || t.source);
+  if (t.pending) meta.push(el('span', { class: 'chip', title: '银行还没正式入账，等它入账后会自动转正，不会重复记' }, '待入账'));
+  if (t.merged_count > 0) meta.push(el('span', { class: 'chip' }, '已合并小票'));
+  if (t.note) meta.push(el('span', { title: t.note }, t.note.length > 26 ? t.note.slice(0, 26) + '…' : t.note));
+
+  const metaNodes = [];
+  meta.forEach((m, i) => {
+    if (i) metaNodes.push(el('span', { class: 'sep' }, '·'));
+    metaNodes.push(m);
+  });
+
+  return el('div', { class: 'txn' },
+    el('div', { class: 'cat-bar', style: `background:${catColor(t.category)}` }),
+    el('div', { class: 'body' },
+      el('div', { class: 'name' }, t.merchant),
+      el('div', { class: 'meta row', style: 'gap:0;flex-wrap:wrap' }, ...metaNodes),
+    ),
+    t.image ? el('a', { class: 'thumb', href: `/img/${t.image}`, target: '_blank', title: '看原图' }, '图') : null,
+    // 外币交易：主币种折算值在上（统计用的就是它），原币金额在下
+    el('div', { style: 'text-align:right' },
+      el('div', { class: `amt mono ${t.txn_kind}` },
+        t.main_cents == null
+          ? money(t.amount_cents, t.currency)
+          : (t.txn_kind === 'refund' ? '+' : '') + money(t.main_cents, cur)),
+      t.currency !== cur
+        ? el('div', { class: 'tiny faint mono nowrap', style: 'margin-top:1px' },
+            t.main_cents == null ? '未折算' : money(t.amount_cents, t.currency))
+        : null,
+    ),
+    el('div', { class: 'acts' },
+      el('button', { class: 'ghost sm', title: '编辑', onClick: () => openEdit(t) }, '✎'),
+    ),
+  );
+}
+
+/* --------------------------------------------------------- 编辑弹层 */
+
+let editing = null;
+function openEdit(t) {
+  editing = t;
+  // 默认不勾。改了分类下拉才自动勾上 —— 只改金额时不应该顺手写一条分类规则
+  $('#e_remember').checked = false;
+  $('#e_rememberLabel').textContent = `记住：以后「${t.merchant}」都归到这一类`;
+  $('#editTitle').textContent = '编辑这笔';
+  $('#e_merchant').value = t.merchant;
+  $('#e_amount').value = (t.amount_cents / 100).toFixed(2);
+  if (![...$('#e_currency').options].some(o => o.value === t.currency)) {
+    $('#e_currency').append(el('option', { value: t.currency }, t.currency));
+  }
+  $('#e_currency').value = t.currency;
+  $('#e_category').value = t.category;
+  $('#e_date').value = t.txn_date;
+  $('#e_time').value = t.txn_time || '';
+  $('#e_kind').value = t.txn_kind;
+  $('#e_note').value = t.note || '';
+  $('#e_extra').textContent = `来源：${SOURCE_CN[t.source] || t.source}`
+    + (t.merged_count ? ` · 已吞并 ${t.merged_count} 条小票记录，合错了可以撤销` : '');
+  $('#e_unmerge').hidden = !t.merged_count;
+  // 整张图一起改 —— 模型把 ¥ 看成 $ 的时候，一张账单几十笔不用一条条改
+  $('#e_ccyAll').hidden = !t.upload_id;
+  syncCcyAllLabel();
+  $('#editDlg').showModal();
+}
+
+function syncCcyAllLabel() {
+  $('#e_ccyAll').textContent = `这张图的账目全部改成 ${$('#e_currency').value}`;
+}
+$('#e_currency').onchange = syncCcyAllLabel;
+
+$('#e_ccyAll').onclick = async () => {
+  const ccy = $('#e_currency').value;
+  if (!confirm(`把这张图读出来的所有账目都改成 ${ccy}？原币金额不变，只是改「这个数字是什么币种」。`)) return;
+  try {
+    const r = await api(`/api/uploads/${editing.upload_id}/currency`, {
+      method: 'POST', body: { currency: ccy },
+    });
+    $('#editDlg').close();
+    boot = await api('/api/bootstrap');
+    await Promise.all([renderOverview(), renderList()]);
+    flash($('#alerts'), r.conflicts ? 'warn' : 'ok', r.message);
+  } catch (e) { alert(e.message); }
+};
+
+// 改了分类就自动勾上「记住」，这正是想让它生效的时机
+$('#e_category').onchange = () => { $('#e_remember').checked = true; };
+
+$('#e_save').onclick = async () => {
+  try {
+    const merchant = $('#e_merchant').value;
+    const category = $('#e_category').value;
+    const r = await api(`/api/transactions/${editing.id}`, {
+      method: 'PATCH',
+      body: {
+        merchant, amount: $('#e_amount').value,
+        currency: $('#e_currency').value,
+        category, date: $('#e_date').value,
+        time: $('#e_time').value || null, kind: $('#e_kind').value,
+        note: $('#e_note').value,
+        remember: $('#e_remember').checked,
+      },
+    });
+    $('#editDlg').close();
+    await Promise.all([renderOverview(), renderList()]);
+    if (r.rule_saved) {
+      flash($('#alerts'), 'ok',
+        `已记住「${merchant}」→ ${category}，以后自动这么分。`
+        + (r.recategorized ? `同时把历史上 ${r.recategorized} 笔一起改过来了。` : ''));
+    }
+  } catch (e) { alert(e.message); }
+};
+
+$('#e_unmerge').onclick = async () => {
+  const r = await api(`/api/transactions/${editing.id}/unmerge`, { method: 'POST' });
+  $('#editDlg').close();
+  await Promise.all([renderOverview(), renderList()]);
+  flash($('#alerts'), 'ok', `已把 ${r.released} 条被合并的记录放回列表。`);
+};
+
+$('#e_del').onclick = async () => {
+  if (!confirm(`删除「${editing.merchant} ${money(editing.amount_cents, cur)}」？`)) return;
+  await api(`/api/transactions/${editing.id}`, { method: 'DELETE' });
+  $('#editDlg').close();
+  await Promise.all([renderOverview(), renderList()]);
+};
+
+/* ----------------------------------------------------------- 筛选器 */
+
+let timer;
+const debounced = () => { clearTimeout(timer); timer = setTimeout(renderList, 260); };
+
+$('#q').oninput    = e => { state.q = e.target.value.trim(); debounced(); };
+$('#fcat').onchange = e => { state.category = e.target.value; renderList(); };
+$('#fmin').oninput = e => { state.min = e.target.value; debounced(); };
+$('#fmax').oninput = e => { state.max = e.target.value; debounced(); };
+$('#ffrom').onchange = e => { state.from = e.target.value; renderList(); };
+$('#fto').onchange  = e => { state.to = e.target.value; renderList(); };
+$('#moreBtn').onclick = () => { $('#more').hidden = !$('#more').hidden; };
+$('#clearBtn').onclick = () => {
+  Object.assign(state, { q: '', category: '', min: '', max: '', from: '', to: '' });
+  for (const id of ['#q', '#fcat', '#fmin', '#fmax', '#ffrom', '#fto']) $(id).value = '';
+  renderList();
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>设置 · 记账</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>💵</text></svg>">
+</head>
+<body>
+<main>
+  <div id="alerts"></div>
+
+  <section class="card">
+    <h2>识别模型</h2>
+    <div style="display:grid;gap:12px">
+      <label class="field"><span>供应商</span><select id="provider"></select></label>
+      <div class="small muted" id="note"></div>
+      <div class="grid2">
+        <label class="field"><span>接口地址 base_url</span><input id="base_url" placeholder="https://…/v1"></label>
+        <label class="field"><span>模型名</span><input id="model" placeholder="gemini-2.5-flash"></label>
+      </div>
+      <label class="field"><span>API key</span>
+        <input id="api_key" type="password" placeholder="粘贴进来，留空表示不修改" autocomplete="off">
+      </label>
+      <div class="grid2">
+        <label class="field"><span>max_tokens（输出预算）</span>
+          <input id="max_tokens" type="number" min="1000" max="32000" step="1000">
+        </label>
+        <label class="field"><span>思考强度 reasoning_effort</span>
+          <select id="reasoning_effort">
+            <option value="">不发这个字段（默认）</option>
+            <option value="none">none — 关掉思考</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+      </div>
+      <div class="tiny faint" style="margin-top:-4px">
+        报「模型返回了空内容、finish_reason=length」就是预算被思考吃光了 ——
+        把 max_tokens 调大，或把思考强度设成 none。设成 none 前先确认这家支持，
+        不支持的可能会直接报 400。
+      </div>
+      <label class="row small" style="gap:7px">
+        <input type="checkbox" id="json_mode" style="width:auto">
+        <span class="muted">强制 JSON 模式（少数供应商需要，报错的话就关掉）</span>
+      </label>
+      <div class="row wrap">
+        <button class="primary" id="save">保存</button>
+        <button id="test">测试连通性</button>
+        <span class="spacer"></span>
+        <a class="thumb" id="apply" href="#" target="_blank" rel="noopener"></a>
+      </div>
+      <div id="testOut" class="small"></div>
+
+      <div style="border-top:1px solid var(--border);padding-top:13px;margin-top:2px">
+        <div class="small" style="font-weight:600;margin-bottom:6px">分类调用（第二段）</div>
+        <div class="tiny faint" style="margin-bottom:11px">
+          识别和分类拆成了两次调用：视觉模型只管把字读准，分类单独跑一次。
+          这样分类那步能拿到分类提示、小票商品明细、还有你过去的分类习惯 ——
+          这些塞进识别那次只会跟 OCR 抢注意力。每张图多一次调用，免费额度仍然够。
+        </div>
+        <label class="row small" style="gap:7px;cursor:pointer">
+          <input type="checkbox" id="cls_enabled" style="width:auto;flex:0 0 auto">
+          <span class="muted">启用（关掉就退回识别时的粗判，省一次调用）</span>
+        </label>
+        <label class="row small" style="gap:7px;margin-top:6px;cursor:pointer">
+          <input type="checkbox" id="cls_history" style="width:auto;flex:0 0 auto">
+          <span class="muted">把我过去的分类习惯当例子喂给模型</span>
+        </label>
+        <label class="field" style="margin-top:11px"><span>分类用哪家</span>
+          <select id="cls_provider"></select>
+        </label>
+        <div class="tiny faint" id="cls_note" style="margin-top:7px"></div>
+        <div id="cls_own" hidden style="margin-top:10px;display:grid;gap:10px">
+          <div class="grid2">
+            <label class="field"><span>接口地址 base_url</span><input id="cls_base_url" placeholder="https://…/v1"></label>
+            <label class="field"><span>模型名</span><input id="cls_model2" placeholder="llama-3.3-70b"></label>
+          </div>
+          <label class="field"><span>API key</span>
+            <input id="cls_api_key" type="password" placeholder="这一家的 key，留空表示不修改" autocomplete="off">
+          </label>
+        </div>
+        <label class="field" id="cls_modelOnly" style="margin-top:10px"><span>分类用的模型</span>
+          <input id="cls_model" placeholder="留空 = 和视觉模型用同一个">
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>账期</h2>
+    <div class="row wrap" style="gap:10px;align-items:flex-end">
+      <label class="field" style="flex:0 0 130px"><span>每月几号起算</span>
+        <input id="cycleDay" type="number" min="1" max="31" step="1">
+      </label>
+      <button id="saveCycle" style="align-self:flex-end">保存</button>
+      <div class="small muted" id="cyclePreview" style="flex:1 1 220px"></div>
+    </div>
+    <div class="tiny faint" style="margin-top:9px">
+      起始日那天算新一期的第一天（15 号起算 = 8/15–9/14 是一期，9/15 进入下一期），
+      所以不会有哪天被算进两期。填 1 就是普通的自然月。
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>币种与汇率</h2>
+    <div class="row wrap" style="gap:10px;align-items:flex-end">
+      <label class="field" style="flex:0 0 150px"><span>记账主币种</span>
+        <select id="mainCcy">
+          <option value="USD">USD 美元</option>
+          <option value="CNY">CNY 人民币</option>
+          <option value="EUR">EUR 欧元</option>
+          <option value="GBP">GBP 英镑</option>
+          <option value="HKD">HKD 港币</option>
+          <option value="JPY">JPY 日元</option>
+          <option value="TWD">TWD 新台币</option>
+        </select>
+      </label>
+      <button class="primary" id="saveCcy" style="align-self:flex-end">保存并重算</button>
+      <div class="small muted" id="ccyInfo" style="flex:1 1 220px"></div>
+    </div>
+    <div id="rates" style="display:grid;gap:7px;margin-top:14px"></div>
+    <div class="row wrap" style="margin-top:11px">
+      <input id="newRateCode" placeholder="币种代码，如 CAD" style="flex:1 1 140px" maxlength="3">
+      <input id="newRateVal" type="number" step="0.0001" min="0" placeholder="1 单位值多少主币种" style="flex:1 1 160px">
+      <button id="addRate">添加</button>
+    </div>
+    <div class="tiny faint" style="margin-top:10px">
+      信用卡刷外币时银行已经按它自己的汇率换过一次了，这里只是把它折回来看个大概，不用追求精确。
+      <b>原币金额永远按账单原样存着不变</b>，改汇率只影响折算值 —— 点「保存并重算」会把历史账目一起重算。
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>消费分类</h2>
+    <div class="tiny faint" style="margin:-6px 0 12px">
+      每个分类下面那行「提示」是给识别模型看的，写清楚典型商户和容易混的情况，分类会准很多。
+    </div>
+    <div id="cats" style="display:grid;gap:6px;margin-bottom:12px"></div>
+    <div class="row wrap" style="margin-top:12px">
+      <input id="newCat" placeholder="新分类名" style="flex:1 1 130px">
+      <input id="newHint" placeholder="提示（可空）" style="flex:2 1 200px">
+      <input id="newColor" type="color" value="#6b7280" style="width:44px;padding:2px;flex:0 0 auto">
+      <button id="addCat">添加</button>
+    </div>
+    <div class="tiny faint" style="margin-top:9px">
+      改分类名，已有账目会一起改过去。删分类，里面的账目会退回「其他」，不会丢。
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>商户记忆</h2>
+    <div class="tiny faint" style="margin:-6px 0 12px">
+      在账目页改某笔的分类时勾上「记住」，这个商户就会记在这里。
+      以后识别到同一家店，<b>直接用你定的分类，不听模型的</b>。删掉某条就交还给模型判断。
+    </div>
+    <div id="rules"></div>
+  </section>
+
+  <section class="card">
+    <h2>数据</h2>
+    <div class="row wrap small">
+      <a class="btn sm" href="/export.csv">导出全部为 CSV</a>
+      <span class="muted">数据库文件在项目目录的 <code>data/data.db</code>，备份就是复制这个文件。</span>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { $, el, api, mountNav, flash } from '/app.js';
+
+const boot = await api('/api/bootstrap');
+mountNav('/settings', boot.pending);
+
+let { config, presets } = await api('/api/config');
+
+if (boot.stale) {
+  flash($('#alerts'), 'err', el('div', {}, el('b', {}, '代码已更新，但服务还在跑旧版。'),
+    ' 磁盘上的 server.js / lib 和内存里的不一致 —— 关掉那个黑窗口，重新双击 start.bat。'),
+    { sticky: true });
+}
+
+/* --------------------------------------------------------- 模型配置 */
+
+$('#provider').append(...Object.entries(presets)
+  .filter(([, p]) => p.vision !== false)          // 不读图的不能做第一段
+  .map(([k, p]) => el('option', { value: k, selected: k === config.vision.provider || null }, p.label)));
+
+/* 分类那家：可以跟视觉共用，也可以单独指一家（含只能做文本的） */
+$('#cls_provider').append(
+  el('option', { value: '' }, '跟视觉共用同一家'),
+  ...Object.entries(presets)
+    .filter(([k]) => k !== 'custom')
+    .map(([k, p]) => el('option', { value: k }, p.label)),
+  el('option', { value: 'custom' }, '自定义 / 我已有的中转'),
+);
+
+function syncClassifyProvider(k, { fill = true } = {}) {
+  const own = Boolean(k);
+  $('#cls_own').hidden = !own;
+  $('#cls_modelOnly').hidden = own;
+  $('#cls_note').textContent = k && presets[k] ? presets[k].note : '';
+  if (own && fill && presets[k]?.base_url) {
+    $('#cls_base_url').value = presets[k].base_url;
+    $('#cls_model2').value = presets[k].model;
+  }
+}
+$('#cls_provider').onchange = e => syncClassifyProvider(e.target.value);
+
+function applyPreset(k, { fill = true } = {}) {
+  const p = presets[k];
+  $('#note').textContent = p.note || '';
+  $('#apply').textContent = p.apply_url ? '去申请 key ↗' : '';
+  $('#apply').href = p.apply_url || '#';
+  $('#apply').style.display = p.apply_url ? '' : 'none';
+  if (fill && p.base_url) { $('#base_url').value = p.base_url; $('#model').value = p.model; }
+}
+
+$('#base_url').value = config.vision.base_url;
+$('#model').value = config.vision.model;
+$('#json_mode').checked = Boolean(config.vision.json_mode);
+$('#max_tokens').value = config.vision.max_tokens || 8000;
+$('#reasoning_effort').value = config.vision.reasoning_effort || '';
+$('#cls_enabled').checked = config.classify?.enabled !== false;
+$('#cls_history').checked = config.classify?.use_history !== false;
+$('#cls_model').value = config.classify?.model || '';
+$('#cls_provider').value = config.classify?.provider || '';
+$('#cls_base_url').value = config.classify?.base_url || '';
+$('#cls_model2').value = config.classify?.model || '';
+$('#cls_api_key').placeholder = config.classify?.api_key_set
+  ? `已保存 ${config.classify.api_key}，留空表示不修改` : '这一家的 key';
+syncClassifyProvider(config.classify?.provider || '', { fill: false });
+$('#api_key').placeholder = config.vision.api_key_set
+  ? `已保存 ${config.vision.api_key}，留空表示不修改` : '粘贴 API key';
+applyPreset(config.vision.provider, { fill: false });
+
+$('#provider').onchange = e => applyPreset(e.target.value);
+
+$('#save').onclick = async () => {
+  try {
+    const r = await api('/api/config', {
+      method: 'PUT',
+      body: { vision: {
+        provider: $('#provider').value,
+        base_url: $('#base_url').value.trim(),
+        model: $('#model').value.trim(),
+        api_key: $('#api_key').value.trim(),
+        json_mode: $('#json_mode').checked,
+        max_tokens: $('#max_tokens').value,
+        reasoning_effort: $('#reasoning_effort').value,
+      },
+      classify: (() => {
+        const provider = $('#cls_provider').value;
+        const base = {
+          enabled: $('#cls_enabled').checked,
+          use_history: $('#cls_history').checked,
+          provider,
+        };
+        return provider
+          ? { ...base, base_url: $('#cls_base_url').value.trim(),
+              model: $('#cls_model2').value.trim(), api_key: $('#cls_api_key').value.trim() }
+          : { ...base, base_url: '', api_key: '', model: $('#cls_model').value.trim() };
+      })() },
+    });
+    config = r.config;
+    $('#api_key').value = '';
+    $('#api_key').placeholder = `已保存 ${config.vision.api_key}，留空表示不修改`;
+    $('#cls_api_key').value = '';
+    if (config.classify?.api_key_set) {
+      $('#cls_api_key').placeholder = `已保存 ${config.classify.api_key}，留空表示不修改`;
+    }
+    flash($('#alerts'), 'ok', '保存好了。建议点一下「测试连通性」确认能用。');
+  } catch (e) { flash($('#alerts'), 'err', e.message); }
+};
+
+$('#test').onclick = async () => {
+  const out = $('#testOut');
+  out.replaceChildren(el('span', { class: 'spin' }), '正在打一次接口…');
+  try {
+    const r = await api('/api/config/test', { method: 'POST' });
+    const line = (label, x) => el('div', { style: `color:var(--${x.ok ? 'ok' : 'danger'});margin-top:3px` },
+      `${x.ok ? '✓' : '✕'} ${label}：${x.message}`);
+    out.replaceChildren(line('第一段 识别', r.vision), line('第二段 分类', r.classify));
+  } catch (e) {
+    out.replaceChildren(el('span', { style: 'color:var(--danger)' }, '✕ ' + e.message));
+  }
+};
+
+/* ----------------------------------------------------------- 分类 */
+
+function renderCats(list) {
+  $('#cats').replaceChildren(...list.map(c => {
+    const name = el('input', { value: c.name, style: 'flex:1' });
+    const color = el('input', { type: 'color', value: c.color || '#6b7280',
+                                style: 'width:40px;padding:2px;flex:0 0 auto' });
+    const hint = el('input', {
+      value: c.hint || '', placeholder: '给模型的提示，比如：gas stations, parking, Uber…',
+      style: 'font-size:12.5px;padding:6px 9px',
+    });
+    const save = async () => {
+      try {
+        const r = await api(`/api/categories/${c.id}`, {
+          method: 'PATCH',
+          body: { name: name.value.trim(), color: color.value, hint: hint.value.trim() },
+        });
+        renderCats(r.categories);
+        flash($('#alerts'), 'ok', `已保存「${name.value.trim()}」。`);
+      } catch (e) { flash($('#alerts'), 'err', e.message); }
+    };
+    return el('div', { style: 'padding:8px 0;border-bottom:1px solid var(--border)' },
+      el('div', { class: 'row' }, color, name,
+        el('button', { class: 'ghost sm', onClick: save }, '保存'),
+        el('button', { class: 'danger sm', onClick: async () => {
+          if (!confirm(`删除分类「${c.name}」？里面的账目会退回「其他」。`)) return;
+          try {
+            const r = await api(`/api/categories/${c.id}`, { method: 'DELETE' });
+            renderCats(r.categories);
+          } catch (e) { flash($('#alerts'), 'err', e.message); }
+        } }, '删除'),
+      ),
+      el('div', { style: 'margin-top:5px' }, hint),
+    );
+  }));
+}
+renderCats(boot.categories);
+
+/* ------------------------------------------------------ 币种与汇率 */
+
+let rates = { ...(boot.rates || {}) };
+
+function renderRates() {
+  const main = $('#mainCcy').value;
+  const used = new Set((boot.currencies || []).map(c => c.currency));
+  const codes = [...new Set([...Object.keys(rates), ...used])].filter(c => c !== main).sort();
+
+  $('#ccyInfo').textContent = (boot.currencies || [])
+    .map(c => `${c.currency} ${c.n} 笔`).join(' · ') || '还没有账目';
+
+  if (!codes.length) {
+    $('#rates').replaceChildren(el('div', { class: 'tiny faint' },
+      '目前只有主币种的账目，不需要配汇率。'));
+    return;
+  }
+  $('#rates').replaceChildren(...codes.map(code => {
+    const v = rates[code];
+    const input = el('input', {
+      type: 'number', step: '0.0001', min: '0', value: v ?? '',
+      placeholder: '未配', style: 'flex:0 0 120px;text-align:right',
+      onInput: e => {
+        const n = Number(e.target.value);
+        if (Number.isFinite(n) && n > 0) rates[code] = n; else delete rates[code];
+        inverse.textContent = rates[code] ? `≈ 1 ${main} 换 ${(1 / rates[code]).toFixed(2)} ${code}` : '未配汇率，这些笔不计入总额';
+      },
+    });
+    const inverse = el('span', { class: 'tiny faint', style: 'flex:1' },
+      v ? `≈ 1 ${main} 换 ${(1 / v).toFixed(2)} ${code}` : '未配汇率，这些笔不计入总额');
+    return el('div', { class: 'row' },
+      el('span', { style: 'flex:0 0 54px;font-weight:600' }, code),
+      el('span', { class: 'tiny faint', style: 'flex:0 0 auto' }, `1 ${code} =`),
+      input,
+      el('span', { class: 'tiny faint', style: 'flex:0 0 auto' }, main),
+      inverse,
+      used.has(code) ? null : el('button', { class: 'danger sm', onClick: () => {
+        delete rates[code]; renderRates();
+      } }, '删除'),
+    );
+  }));
+}
+$('#mainCcy').value = boot.currency || 'USD';
+$('#mainCcy').onchange = renderRates;
+renderRates();
+
+$('#addRate').onclick = () => {
+  const code = $('#newRateCode').value.trim().toUpperCase();
+  const val = Number($('#newRateVal').value);
+  if (!/^[A-Z]{3}$/.test(code)) return flash($('#alerts'), 'err', '币种代码要 3 个字母，比如 CAD');
+  if (!Number.isFinite(val) || val <= 0) return flash($('#alerts'), 'err', '汇率要填个正数');
+  rates[code] = val;
+  $('#newRateCode').value = ''; $('#newRateVal').value = '';
+  renderRates();
+};
+
+$('#saveCcy').onclick = async () => {
+  try {
+    await api('/api/config', { method: 'PUT', body: { currency: $('#mainCcy').value, rates } });
+    const r = await api('/api/rates/recompute', { method: 'POST' });
+    flash($('#alerts'), r.unconverted ? 'warn' : 'ok', r.message);
+    const fresh = await api('/api/bootstrap');
+    boot.currency = fresh.currency; boot.rates = fresh.rates; boot.currencies = fresh.currencies;
+    rates = { ...fresh.rates };
+    renderRates();
+  } catch (e) { flash($('#alerts'), 'err', e.message); }
+};
+
+/* ----------------------------------------------------------- 账期 */
+
+function previewCycle(day) {
+  const p = boot.periods?.[0];
+  $('#cyclePreview').textContent = Number(day) === 1
+    ? '当前：按自然月统计。'
+    : `当前这一期：${p ? p.label : '—'}`;
+}
+$('#cycleDay').value = boot.cycle_start_day;
+previewCycle(boot.cycle_start_day);
+
+$('#saveCycle').onclick = async () => {
+  const day = Math.min(31, Math.max(1, Math.trunc(Number($('#cycleDay').value)) || 1));
+  $('#cycleDay').value = day;
+  try {
+    await api('/api/config', { method: 'PUT', body: { cycle_start_day: day } });
+    flash($('#alerts'), 'ok', `账期改成每月 ${day} 号起算了。回账目页看看。`);
+    const fresh = await api('/api/bootstrap');
+    boot.periods = fresh.periods; boot.cycle_start_day = fresh.cycle_start_day;
+    previewCycle(day);
+  } catch (e) { flash($('#alerts'), 'err', e.message); }
+};
+
+/* ------------------------------------------------------- 商户记忆 */
+
+async function renderRules() {
+  const { rules } = await api('/api/rules');
+  const box = $('#rules');
+  if (!rules.length) {
+    box.replaceChildren(el('div', { class: 'empty', style: 'padding:22px 10px' },
+      '还没有记住任何商户。'));
+    return;
+  }
+  box.replaceChildren(...rules.map(r => el('div', { class: 'row',
+      style: 'padding:8px 2px;border-bottom:1px solid var(--border)' },
+    el('span', { style: 'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' },
+      r.merchant),
+    el('span', { class: 'chip' }, r.category),
+    el('span', { class: 'tiny faint nowrap' }, `${r.txn_count} 笔`),
+    el('button', { class: 'danger sm', onClick: async () => {
+      await api(`/api/rules?key=${encodeURIComponent(r.merchant_key)}`, { method: 'DELETE' });
+      renderRules();
+    } }, '删除'),
+  )));
+}
+renderRules();
+
+$('#addCat').onclick = async () => {
+  const name = $('#newCat').value.trim();
+  if (!name) return;
+  try {
+    const r = await api('/api/categories', {
+      method: 'POST',
+      body: { name, color: $('#newColor').value, hint: $('#newHint').value.trim() },
+    });
+    $('#newCat').value = ''; $('#newHint').value = '';
+    renderCats(r.categories);
+  } catch (e) { flash($('#alerts'), 'err', e.message); }
+};
+</script>
+</body>
+</html>

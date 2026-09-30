@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>上传 · 记账</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>💵</text></svg>">
+</head>
+<body>
+<main>
+  <div id="alerts"></div>
+
+  <section class="card">
+    <div class="drop" id="drop" tabindex="0" role="button">
+      <div class="big">拍张小票，或截个 BofA 账单</div>
+      <div class="small muted">点这里选图 · 拖进来 · 或者直接 Ctrl/⌘+V 粘贴截图</div>
+      <div class="tiny faint" style="margin-top:8px">一次可以选多张。账单截图可以滚动多截几张，重叠的部分会自动跳过。</div>
+    </div>
+    <input type="file" id="file" accept="image/*" multiple hidden>
+    <div class="row wrap" style="margin-top:13px;gap:9px;align-items:center">
+      <span class="small muted nowrap">这批图的币种</span>
+      <select id="upCcy" style="width:auto;flex:0 1 200px"></select>
+      <span class="tiny faint" id="upCcyHint" style="flex:1 1 200px"></span>
+    </div>
+  </section>
+
+  <section class="card" id="queueCard" hidden>
+    <h2>本次上传</h2>
+    <div id="queue"></div>
+  </section>
+
+  <section class="card">
+    <h2>手动记一笔</h2>
+    <div class="row wrap" style="gap:10px">
+      <label class="field" style="flex:2 1 160px"><span>商户</span><input id="m_merchant" placeholder="星巴克"></label>
+      <label class="field" style="flex:1 1 100px"><span>金额</span><input id="m_amount" type="number" step="0.01" inputmode="decimal" placeholder="8.50"></label>
+      <label class="field" style="flex:1 1 110px"><span>分类</span><select id="m_category"></select></label>
+      <label class="field" style="flex:1 1 140px"><span>日期</span><input id="m_date" type="date"></label>
+      <button class="primary" id="m_add" style="align-self:flex-end">添加</button>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { $, el, api, money, mountNav, flash, SOURCE_CN } from '/app.js';
+
+const boot = await api('/api/bootstrap');
+mountNav('/upload', boot.pending);
+const cur = boot.currency;
+let pending = boot.pending;
+
+$('#m_category').append(...boot.categories.map(c => el('option', { value: c.name }, c.name)));
+$('#m_date').value = boot.today;
+
+/* ------------------------------------------------------------- 币种 */
+
+// 主币种 + 配了汇率的 + 账目里出现过的，去重
+// 兜底带上常用币种 —— 汇率表万一是空的也得能选到 CNY
+const ccyList = [...new Set([
+  boot.currency,
+  ...Object.keys(boot.rates || {}),
+  ...(boot.currencies || []).map(c => c.currency),
+  'USD', 'CNY', 'EUR', 'GBP', 'HKD', 'JPY', 'TWD',
+])];
+$('#upCcy').append(
+  el('option', { value: 'auto' }, '自动识别（看图上的符号）'),
+  ...ccyList.map(c => el('option', { value: c },
+    c === boot.currency ? `${c}（主币种）` : c)),
+);
+// 记住上次的选择 —— 老是传同一张卡的账单，不用每次重选
+let savedCcy = 'auto';
+try { savedCcy = localStorage.getItem('upload_currency') || 'auto'; } catch {}
+if ([...$('#upCcy').options].some(o => o.value === savedCcy)) $('#upCcy').value = savedCcy;
+
+function ccyHint() {
+  const v = $('#upCcy').value;
+  $('#upCcyHint').textContent = v === 'auto'
+    ? '让模型看图上的 $ / ¥ 判断。人民币信用卡账单建议直接选 CNY，比猜稳。'
+    : `整张图都按 ${v} 记，模型认成什么都不算数。`;
+}
+$('#upCcy').onchange = () => {
+  try { localStorage.setItem('upload_currency', $('#upCcy').value); } catch {}
+  ccyHint();
+};
+ccyHint();
+
+if (boot.stale) {
+  flash($('#alerts'), 'err', el('div', {}, el('b', {}, '代码已更新，但服务还在跑旧版。'),
+    ' 磁盘上的 server.js / lib 和内存里的不一致 —— 关掉那个黑窗口，重新双击 start.bat。'),
+    { sticky: true });
+}
+
+if (!boot.api_key_set) {
+  flash($('#alerts'), 'warn', el('div', {}, el('b', {}, '还没配置识别模型。'),
+    ' 现在上传会失败 —— ', el('a', { href: '/settings' }, '先去设置里填个免费 API key'), '。'), { sticky: true });
+}
+
+/* --------------------------------------------------------- 选图入口 */
+
+$('#drop').onclick = () => $('#file').click();
+$('#drop').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') $('#file').click(); };
+$('#file').onchange = e => { handle([...e.target.files]); e.target.value = ''; };
+
+for (const ev of ['dragenter', 'dragover']) {
+  $('#drop').addEventListener(ev, e => { e.preventDefault(); $('#drop').classList.add('over'); });
+}
+for (const ev of ['dragleave', 'drop']) {
+  $('#drop').addEventListener(ev, e => { e.preventDefault(); $('#drop').classList.remove('over'); });
+}
+$('#drop').addEventListener('drop', e => {
+  handle([...e.dataTransfer.files].filter(f => f.type.startsWith('image/')));
+});
+
+// 截图后直接 Ctrl/⌘+V —— 这是传账单截图最快的路径
+window.addEventListener('paste', e => {
+  const imgs = [...(e.clipboardData?.items || [])]
+    .filter(i => i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
+  if (imgs.length) { e.preventDefault(); handle(imgs); }
+});
+
+/* --------------------------------------------------------- 上传队列 */
+
+const toBase64 = file => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1]);
+  r.onerror = () => reject(new Error('读不了这个文件'));
+  r.readAsDataURL(file);
+});
+
+async function handle(files) {
+  if (!files.length) return;
+  $('#queueCard').hidden = false;
+  // 一张一张来：识别接口有速率限制，并发容易撞 429
+  for (const f of files) await one(f);
+}
+
+async function one(file) {
+  const thumb = el('img', { src: URL.createObjectURL(file), alt: '' });
+  const status = el('div', { class: 'st' }, el('span', { class: 'spin' }), '识别中…');
+  const detail = el('div', { class: 'tiny faint' });
+  const item = el('div', { class: 'queue-item' },
+    thumb,
+    el('div', { style: 'flex:1;min-width:0' },
+      el('div', { class: 'small', style: 'font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' },
+        file.name || '截图'),
+      status, detail),
+  );
+  $('#queue').prepend(item);
+
+  try {
+    const res = await api('/api/upload', {
+      method: 'POST',
+      body: {
+        data: await toBase64(file), mime: file.type || 'image/jpeg',
+        filename: file.name || '', currency: $('#upCcy').value,
+      },
+    });
+
+    if (res.duplicate_image) {
+      status.className = 'st';
+      status.replaceChildren('⟳ ', res.message);
+      return;
+    }
+
+    const n = res.inserted?.length || 0;
+    status.className = 'st ' + (n ? 'ok' : '');
+    status.textContent = (n ? '✓ ' : '· ') + res.message;
+
+    detail.replaceChildren();
+    if (n) {
+      detail.append(el('div', { style: 'margin-top:6px;display:grid;gap:3px' },
+        ...res.inserted.map(t => el('div', { class: 'row', style: 'gap:8px' },
+          el('span', { style: 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' },
+            `${t.txn_date}${t.txn_time ? ' ' + t.txn_time : ''}  ${t.merchant}`),
+          el('span', { class: 'chip' }, t.category),
+          el('span', { class: 'mono nowrap' }, money(t.amount_cents, t.currency)),
+        )),
+      ));
+    }
+    if (res.skipped?.length) {
+      detail.append(el('div', { style: 'margin-top:5px' },
+        `跳过的 ${res.skipped.length} 笔：`
+        + res.skipped.map(s => `${s.merchant} ${money(s.amount_cents, cur)}`).join('、')));
+    }
+    if (res.candidates) {
+      pending = res.pending_total ?? pending + res.candidates;
+      flash($('#alerts'), 'warn', el('div', {}, `有 ${res.candidates} 笔疑似和已有记录是同一笔 —— `,
+        el('a', { href: '/' }, '回账目页确认'), '。'), { sticky: true });
+    }
+  } catch (e) {
+    status.className = 'st err';
+    status.textContent = '✕ ' + e.message;
+  }
+}
+
+/* --------------------------------------------------------- 手动记账 */
+
+$('#m_add').onclick = async () => {
+  const merchant = $('#m_merchant').value.trim();
+  const amount = $('#m_amount').value;
+  if (!merchant || !amount) return alert('商户和金额都要填');
+  try {
+    const r = await api('/api/transactions', {
+      method: 'POST',
+      body: { merchant, amount, category: $('#m_category').value, date: $('#m_date').value, kind: 'expense' },
+    });
+    flash($('#alerts'), r.inserted ? 'ok' : 'info', r.message);
+    $('#m_merchant').value = ''; $('#m_amount').value = '';
+    $('#m_merchant').focus();
+  } catch (e) { alert(e.message); }
+};
+</script>
+</body>
+</html>

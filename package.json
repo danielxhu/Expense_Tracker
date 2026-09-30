@@ -1,0 +1,12 @@
+{
+  "name": "jizhang",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "个人记账 - 上传小票/账单截图自动记账",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}
