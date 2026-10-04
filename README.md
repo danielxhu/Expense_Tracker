@@ -1,4 +1,4 @@
-#Personal Expense Tracker
+# Personal Expense Tracker
 
 Upload a receipt photo or a bank statement screenshot. It reads the merchant, amount, time and
 category automatically. Three layers of de-duplication make sure nothing gets recorded twice.
